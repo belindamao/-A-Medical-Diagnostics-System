@@ -1,0 +1,334 @@
+# coding: utf-8
+
+# In[1]:
+
+
+## Use GANs to do semi-supervised learning
+import os
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm_notebook as tqdm
+from keras.models import Model
+from keras.layers import Input, Reshape
+from keras.layers.core import Dense, Activation, Dropout, Flatten
+from keras.layers.normalization import BatchNormalization
+from keras.layers.convolutional import UpSampling1D, Conv1D
+from keras.layers.advanced_activations import LeakyReLU
+from keras.optimizers import Adam, SGD
+from keras.callbacks import TensorBoard
+
+
+# In[2]:
+
+
+os.getcwd()
+
+
+# In[3]:
+
+
+# Train set
+train_val = pd.read_csv('samples_encoding_train.csv',header=0,sep=',', na_values = 'NA',index_col=0)
+# Test set
+test_val = pd.read_csv('samples_encoding_test.csv',header=0,sep=',', na_values = 'NA',index_col = 0)
+# All clean samples
+samples = pd.read_csv('samples_cal.csv',header=0,sep=',', na_values = 'NA',index_col =0 )
+test_set_id = pd.read_csv('test_set_id.csv',header=0,sep=',', na_values = 'NA',index_col =0 )
+
+train_val = train_val.fillna(0)
+test_val = test_val.fillna(0)
+samples = samples.fillna(0)
+train_val = train_val.astype(int)
+test_val = test_val.astype(int)
+samples = samples.astype(int)
+
+
+# In[4]:
+
+
+print(train_val.shape,test_val.shape)
+
+
+# In[5]:
+
+
+#. Partition the data into train and testing
+from sklearn.model_selection import train_test_split
+train_val_X = samples.drop('target',axis=1,inplace=False)
+train_val_Y = samples['target']
+train_val_X.shape
+
+
+# In[6]:
+
+
+##Feature Selection
+##Using Wrapper Method
+from sklearn.feature_selection import RFE
+from sklearn.linear_model import LogisticRegression
+
+model = LogisticRegression()
+
+rfe = RFE(model, 15) 
+rfe = rfe.fit(train_val_X, train_val_Y)
+
+print(rfe.support_)
+print(rfe.ranking_) 
+
+
+# In[7]:
+
+
+#Getting the feature after dimentionality deduction
+col_filter = train_val_X.columns[rfe.support_] 
+len(col_filter)
+
+
+# In[8]:
+
+
+##Using Embedded Method
+##Get the feature importances with random forest
+names = train_val_X[col_filter].columns
+from sklearn.ensemble import RandomForestClassifier
+clf=RandomForestClassifier(n_estimators=10,random_state=123)
+clf.fit(train_val_X[col_filter],train_val_Y) 
+names, clf.feature_importances_
+for feature in zip(names, clf.feature_importances_):
+    print(feature)
+
+
+# In[9]:
+
+
+import matplotlib.pyplot as plt
+plt.style.use('fivethirtyeight')
+plt.rcParams['figure.figsize'] = (12,6)
+
+## feature importances
+importances = clf.feature_importances_
+feat_names = names
+indices = np.argsort(importances)[::-1]
+fig = plt.figure(figsize=(20,6))
+plt.title("Feature importances by RandomTreeClassifier")
+plt.bar(range(len(indices)), importances[indices], color='lightblue',  align="center")
+plt.step(range(len(indices)), np.cumsum(importances[indices]), where='mid', label='Cumulative')
+plt.xticks(range(len(indices)), feat_names[indices], rotation='vertical',fontsize=14)
+plt.xlim([-1, len(indices)])
+plt.show()
+
+
+# In[10]:
+
+
+train_len = len(train_val[col_filter].index)
+train_len
+
+
+# In[11]:
+
+
+out_dim = len(train_val[col_filter].columns)
+out_dim
+
+
+# In[12]:
+
+
+#Create the models
+#Create a model to train to generate some data with fake labels from some noise 
+#and a model supposed to detect real data from generated data.
+
+#Generative model
+#Create a generative model using simple dense layers activated by tanh. 
+#This model will take noise and try to generate some data with fake labels from it. 
+#This model will not be trained directly but trained via the GAN.
+def get_generative(G_in, dense_dim=200, out_dim=15, lr=1e-3):
+    x = Dense(dense_dim)(G_in)
+    x = Activation('tanh')(x)
+    G_out = Dense(out_dim, activation='tanh')(x)
+    G = Model(G_in, G_out)
+    opt = SGD(lr=lr)
+    G.compile(loss='binary_crossentropy', optimizer=opt)
+    return G, G_out
+
+G_in = Input(shape=[10])
+G, G_out = get_generative(G_in)
+G.summary()
+
+
+# In[13]:
+
+
+#Discriminative model
+#Similarly, create our discriminative model that will define 
+#if the generated data with fake labels is real or outputted by the generative model. T
+#This model, though will be trained directly.
+def get_discriminative(D_in, lr=1e-3, drate=.25, n_channels=50, conv_sz=5, leak=.2):
+    x = Reshape((-1, 1))(D_in)
+    x = Conv1D(n_channels, conv_sz, activation='relu')(x)
+    x = Dropout(drate)(x)
+    x = Flatten()(x)
+    x = Dense(n_channels)(x)
+    D_out = Dense(2, activation='sigmoid')(x)
+    D = Model(D_in, D_out)
+    dopt = Adam(lr=lr)
+    D.compile(loss='binary_crossentropy', optimizer=dopt)
+    return D, D_out
+
+D_in = Input(shape=[15])
+D, D_out = get_discriminative(D_in)
+D.summary()
+
+
+# In[14]:
+
+
+#Chained model: GAN
+#Finally, chain the two models into a GAN that will serve to train the generator while we freeze the discriminator.
+
+#In order to freeze the weights of a given model, 
+#we create this freezing function that we will apply on the discriminative model each time we train the GAN, 
+#in order to train the generative model.
+
+def set_trainability(model, trainable=False):
+    model.trainable = trainable
+    for layer in model.layers:
+        layer.trainable = trainable
+        
+def make_gan(GAN_in, G, D):
+    set_trainability(D, False)
+    x = G(GAN_in)
+    GAN_out = D(x)
+    GAN = Model(GAN_in, GAN_out)
+    GAN.compile(loss='binary_crossentropy', optimizer=G.optimizer)
+    return GAN, GAN_out
+
+GAN_in = Input([10])
+GAN, GAN_out = make_gan(GAN_in, G, D)
+GAN.summary()
+
+
+# In[15]:
+
+
+#Training
+#Now after setting up our models, train the models by alterning training the discriminator and the chained models.
+
+#Pre-training
+#Generate some fake and real data and pre-train the discriminator before starting the gan. 
+#Check if our compiled models correclty runs on our real and noisy input.
+def sample_data_and_gen(G, noise_dim=10, n_samples=10000):
+    XT = np.array(train_val[col_filter])
+    XN_noise = np.random.uniform(0, 1, size=[n_samples, noise_dim])
+    XN = G.predict(XN_noise)
+    X = np.concatenate((XT, XN),axis=0)
+    y = np.zeros((int(train_len+n_samples), 2))
+    y[:train_len, 1] = 1
+    y[train_len:, 0] = 1
+    return X, y
+
+def pretrain(G, D, noise_dim=10, n_samples=10000, batch_size=32):
+    X, y = sample_data_and_gen(G, n_samples=n_samples, noise_dim=noise_dim)
+    set_trainability(D, True)
+    D.fit(X, y, epochs=1, batch_size=batch_size)
+
+pretrain(G, D)
+
+
+# In[27]:
+
+
+#Alternating training steps
+#Train our GAN by alternating the training of the Discriminator 
+#and the training of the chained GAN model with Discriminator’s weights freezed.
+def sample_noise(G, noise_dim=10, n_samples=10000):
+    X = np.random.uniform(0, 1, size=[n_samples, noise_dim])
+    y = np.zeros((n_samples, 2))
+    y[:, 1] = 1
+    return X, y
+
+def train(GAN, G, D, epochs=500, n_samples=10000, noise_dim=10, batch_size=32, verbose=False, v_freq=50):
+    d_loss = []
+    g_loss = []
+    e_range = range(epochs)
+    if verbose:
+        e_range = tqdm(e_range)
+    for epoch in e_range:
+        X, y = sample_data_and_gen(G, n_samples=n_samples, noise_dim=noise_dim)
+        set_trainability(D, True)
+        d_loss.append(D.train_on_batch(X, y))
+        
+        X, y = sample_noise(G, n_samples=n_samples, noise_dim=noise_dim)
+        set_trainability(D, False)
+        g_loss.append(GAN.train_on_batch(X, y))
+        if verbose and (epoch + 1) % v_freq == 0:
+            print("Epoch #{}: Generative Loss: {}, Discriminative Loss: {}".format(epoch + 1, g_loss[-1], d_loss[-1]))
+    return d_loss, g_loss
+
+d_loss, g_loss = train(GAN, G, D, verbose=True)
+
+
+# In[28]:
+
+
+ax = pd.DataFrame(
+    {
+        'Generative Loss': g_loss,
+        'Discriminative Loss': d_loss,
+    }
+).plot(title='Training loss', logy=True)
+ax.set_xlabel("Epochs")
+ax.set_ylabel("Loss")
+
+
+# In[18]:
+
+
+print('What is interesting here is that both sides are playing with each other, each learning how to get better than the other. We see that during some phases, either the generator or the discriminator is lowering its loss relative to a loss gain on the other side.')
+
+
+# In[19]:
+
+
+print('We actually do not really want to have models converging to zero too fast, otherwise, that means that they managed to trick each other. However the amount of times each model got better relatively to the other may be an interesting metric.')
+
+
+# In[20]:
+
+
+print('Also, the discriminative loss is pretty small here by using GANs algorithm.')
+
+
+# In[21]:
+
+
+samples_gan = D.predict(np.array(test_val[col_filter]))
+
+
+# In[22]:
+
+
+samples_gan_df = pd.DataFrame(samples_gan,columns=['test_id','prediction'])
+samples_gan_df['id'] = test_set_id
+del samples_gan_df['test_id']
+samples_gan_df.head()
+
+
+# In[23]:
+
+
+#We can see this model classifies loan in probablistic way.
+#Let's see the case this model misses:
+y_class = pd.DataFrame(samples_gan).idxmax(axis=1)
+y_class.tail()
+
+
+# In[24]:
+
+
+samples_gan_df.to_csv('samples_gan_df.csv')
+
