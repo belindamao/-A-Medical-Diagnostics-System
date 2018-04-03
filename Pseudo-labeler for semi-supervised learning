@@ -1,0 +1,661 @@
+# coding: utf-8
+
+# In[239]:
+
+
+import os
+import numpy as np
+import pandas as pd
+import csv
+import re
+import pandas as pd
+import numpy as np
+import os
+import sys
+import matplotlib.pyplot as plt
+import seaborn as sb
+
+from sklearn import preprocessing
+from sklearn.linear_model import LogisticRegression
+from sklearn.cross_validation import train_test_split
+from sklearn import metrics 
+from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GridSearchCV
+from xgboost import XGBRegressor
+from sklearn.linear_model import BayesianRidge, Ridge, ElasticNet
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, GradientBoostingRegressor
+from sklearn.neural_network import MLPRegressor
+
+
+# In[240]:
+
+
+os.getcwd()
+
+
+# In[241]:
+
+
+csvfile = open('samples.csv', 'r')
+reader = csv.reader(csvfile)
+
+samples_row = []
+for row in reader:
+    samples_row.append(row)
+csvfile.close()
+
+
+# In[243]:
+
+
+fileHeader = ["target"] + list(range(100))
+
+csvFile = open("samples_colname.csv", "w")
+writer = csv.writer(csvFile)
+writer.writerow(fileHeader)
+for item in samples_row:
+    writer.writerow(item)
+csvFile.close()
+samples_colname = pd.read_csv('samples_colname.csv', sep = ',',header=0, na_values = 'NA', engine = 'python',
+                     error_bad_lines=False, warn_bad_lines=True)
+samples_colname = samples_colname.dropna(how='all', axis=1)
+samples_colname = samples_colname.fillna(0)
+samples_colname.head()
+
+
+# In[244]:
+
+
+positives = pd.read_csv('positives.csv',header=None, na_values = 'NA')
+positives = positives.rename(columns={0: 'target'})
+positives.head()
+
+
+# In[245]:
+
+
+positives.shape
+
+
+# In[246]:
+
+
+# Semi-supervised learning
+# Pseudo labelling
+#train_set = pd.merge(samples_new, pos, on='target')
+
+train_set = pd.merge(samples_colname, positives, on='target')
+train_set.shape
+
+
+# In[247]:
+
+
+train_set.head()
+
+
+# In[248]:
+
+
+pos_list = positives['target'].tolist()
+flag = samples_colname['target'].isin(pos_list)
+diff_flag = [not f for f in flag]
+test_set = samples_colname[diff_flag]
+# reindex
+test_set.index = [i for i in range(len(test_set))]
+test_set.shape
+
+
+# In[249]:
+
+
+test_set_id = pd.DataFrame(test_set['target'])
+test_set_id.shape
+
+
+# In[250]:
+
+
+test_set_id.to_csv('test_set_id.csv')
+
+
+# In[251]:
+
+
+train_set = train_set.fillna(0)
+test_set = test_set.fillna(0)
+test_set.head()
+
+
+# In[252]:
+
+
+##Preprocessing
+#a. Remove the target from the entire dataset
+X_train = train_set.drop('target', axis=1, inplace=False)
+#Let the response variable become binary variable using dummy variables
+train_set['target']=1
+Y_train = pd.DataFrame(train_set['target'])
+X_test = test_set.drop('target', axis=1, inplace=False)
+test_set['target']=0
+Y_test = pd.DataFrame(test_set['target'])
+Y_train.head(2)
+
+
+# In[253]:
+
+
+X_test.head(2)
+
+
+# In[254]:
+
+
+# Reframe the input dataset
+def reframe_with_colname(X):
+    columns = []
+    for j in range(len(X.columns)):
+        for i in range(len(X.index)):
+            columns.append(X.iloc[i,j])
+        
+    columns_new = sorted(set(columns),key=columns.index)
+    columns_new.remove(0)
+    col = np.array(columns_new)
+    new = np.zeros((len(X.index),len(col)))
+    for s in range(len(X.index)):
+        for item in X.iloc[s,:].values:
+            p = np.where(col == item)[0].astype(int)
+            new[s,p]=1
+    new = new.astype(int)
+    ns = pd.DataFrame(new)
+    return columns_new, ns
+
+columns_new1, train_binary = reframe_with_colname(X_train)
+columns_new2, test_binary = reframe_with_colname(X_test)
+train_binary.head(2)
+
+
+# In[255]:
+
+
+print (len(columns_new1),len(columns_new2))
+
+
+# In[256]:
+
+
+col_merge = list(set(columns_new1+columns_new2))
+len(col_merge)
+
+
+# In[257]:
+
+
+test_binary.head()
+
+
+# In[258]:
+
+
+def rewrite_csv(df):
+    csvFile = open("samples_encoding.csv", "w")
+    writer = csv.writer(csvFile)
+    writer.writerow(col_merge)
+    for i in range(len(df.index)):
+        row = df.iloc[i,:].tolist()
+        writer.writerow(row)
+    csvFile.close()
+
+rewrite_csv(train_binary)
+
+samples_encoding_train = pd.read_csv('samples_encoding.csv',header=0,sep=',', na_values = 'NA')
+samples_encoding_train = samples_encoding_train.fillna(0)
+samples_encoding_train = pd.concat([samples_encoding_train, Y_train],axis=1).astype(int)
+samples_encoding_train.to_csv('samples_encoding_train.csv')
+
+rewrite_csv(test_binary)
+samples_encoding_test = pd.read_csv('samples_encoding.csv',header=0,sep=',', na_values = 'NA')
+samples_encoding_test.to_csv('samples_encoding_test.csv')
+
+samples_encoding_test = samples_encoding_test.fillna(0)
+samples_encoding_test = samples_encoding_test.astype(int)
+samples_encoding_test2 = pd.concat([samples_encoding_test, Y_test],axis=1).astype(int)
+
+samples = pd.concat([samples_encoding_train, samples_encoding_test2.iloc[0:50,:]],axis=0).astype(int)
+samples.to_csv('samples_cal.csv')
+samples_encoding_train.head(2)
+
+
+# In[259]:
+
+
+print(samples_encoding_train.shape,samples_encoding_test.shape)
+
+
+# In[260]:
+
+
+samples_encoding_test.head(2)
+
+
+# In[261]:
+
+
+samples.shape
+
+
+# In[263]:
+
+
+#d. Partition the data into train and testing
+from sklearn.model_selection import train_test_split
+train_val_X = samples.drop('target',axis=1,inplace=False)
+train_val_Y = samples['target']
+train_val_Y.shape
+
+
+# In[264]:
+
+
+##Feature Selection
+##Using Wrapper Method
+from sklearn.feature_selection import RFE
+from sklearn.linear_model import LogisticRegression
+
+model = LogisticRegression()
+
+rfe = RFE(model, 15) 
+rfe = rfe.fit(train_val_X, train_val_Y)
+
+print(rfe.support_)
+print(rfe.ranking_) 
+
+
+# In[265]:
+
+
+#Getting the feature after dimentionality deduction
+col_filter = train_val_X.columns[rfe.support_] 
+len(col_filter)
+
+
+# In[266]:
+
+
+##Using Embedded Method
+##Get the feature importances with random forest
+names = train_val_X[col_filter].columns
+from sklearn.ensemble import RandomForestClassifier
+clf=RandomForestClassifier(n_estimators=10,random_state=123)
+clf.fit(train_val_X[col_filter],train_val_Y) 
+names, clf.feature_importances_
+for feature in zip(names, clf.feature_importances_):
+    print(feature)
+
+
+# In[267]:
+
+
+import matplotlib.pyplot as plt
+plt.style.use('fivethirtyeight')
+plt.rcParams['figure.figsize'] = (12,6)
+
+## feature importances##
+importances = clf.feature_importances_
+feat_names = names
+indices = np.argsort(importances)[::-1]
+fig = plt.figure(figsize=(20,6))
+plt.title("Feature importances by RandomTreeClassifier")
+plt.bar(range(len(indices)), importances[indices], color='lightblue',  align="center")
+plt.step(range(len(indices)), np.cumsum(importances[indices]), where='mid', label='Cumulative')
+plt.xticks(range(len(indices)), feat_names[indices], rotation='vertical',fontsize=14)
+plt.xlim([-1, len(indices)])
+plt.show()
+
+
+# In[268]:
+
+
+X_train_sub, X_test_sub, y_train_sub, y_test_sub = train_test_split(train_val_X[col_filter], train_val_Y, test_size=0.3, random_state=123)
+print(X_train_sub.shape)
+
+
+# In[269]:
+
+
+X_train_sub.head()
+
+
+# In[270]:
+
+
+y_train_sub.head()
+
+
+# In[271]:
+
+
+features = X_train_sub.columns
+features
+
+
+# In[272]:
+
+
+# Model Exploration
+# In this section we explore the performance of couple of out-of-the-box models. 
+# The metric in which this exerceise is evaluate is R2.
+from xgboost import XGBRegressor
+from sklearn.linear_model import BayesianRidge, Ridge
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, GradientBoostingRegressor
+from sklearn.neural_network import MLPRegressor
+
+from sklearn.metrics import r2_score
+from sklearn.model_selection import cross_val_score
+
+model_factory = [
+    RandomForestRegressor(n_jobs=1),
+    XGBRegressor(),
+    MLPRegressor(),
+    BayesianRidge(),
+    GradientBoostingRegressor()
+]
+
+for model in model_factory:
+    model.seed = 42
+    num_folds = 3
+
+    scores = cross_val_score(model, X_train_sub[col_filter], y_train_sub.values.ravel(), cv=num_folds, scoring='r2')
+    score_description = " %0.2f (+/- %0.2f)" % (scores.mean(), scores.std() * 2)
+
+    print('{model:25} CV-5 R2: {score}'.format(
+        model=model.__class__.__name__,
+        score=score_description
+    ))
+
+
+# In[273]:
+
+
+# Pseud-Labeler class
+from sklearn.utils import shuffle
+from sklearn.base import BaseEstimator, RegressorMixin
+
+class PseudoLabeler(BaseEstimator, RegressorMixin):
+    '''
+    Sci-kit learn wrapper for creating pseudo-lebeled estimators.
+    '''
+    
+    def __init__(self, model, unlabled_data, features, target, sample_rate=0.2, seed=42):
+        '''
+        @sample_rate - percent of samples used as pseudo-labelled data
+                       from the unlabled dataset
+        '''
+        assert sample_rate <= 1.0, 'Sample_rate should be between 0.0 and 1.0.'
+        
+        self.sample_rate = sample_rate
+        self.seed = seed
+        self.model = model
+        self.model.seed = seed
+        
+        self.unlabled_data = unlabled_data
+        self.features = features
+        self.target = target
+        
+    def get_params(self, deep=True):
+        return {
+            "sample_rate": self.sample_rate,
+            "seed": self.seed,
+            "model": self.model,
+            "unlabled_data": self.unlabled_data,
+            "features": self.features,
+            "target": self.target
+        }
+
+    def set_params(self, **parameters):
+        for parameter, value in parameters.items():
+            setattr(self, parameter, value)
+        return self
+
+        
+    def fit(self, X, y):
+        '''
+        Fit the data using pseudo labeling.
+        '''
+
+        augemented_train = self.__create_augmented_train(X, y)
+        self.model.fit(
+            augemented_train[self.features],
+            augemented_train[self.target]
+        )
+        
+        return self
+
+
+    def __create_augmented_train(self, X, y):
+        '''
+        Create and return the augmented_train set that consists
+        of pseudo-labeled and labeled data.
+        '''        
+        num_of_samples = int(len(self.unlabled_data) * self.sample_rate)
+        
+        # Train the model and creat the pseudo-labels
+        self.model.fit(X, y)
+        pseudo_labels = self.model.predict(self.unlabled_data[self.features])
+        
+        # Add the pseudo-labels to the test set
+        pseudo_data = self.unlabled_data.copy(deep=True)
+        pseudo_data[self.target] = pseudo_labels
+        
+        # Take a subset of the test set with pseudo-labels and append in onto
+        # the training set
+        sampled_pseudo_data = pseudo_data.sample(n=num_of_samples)
+        temp_train = pd.concat([X, y], axis=1)
+        augemented_train = pd.concat([sampled_pseudo_data, temp_train])
+
+        return shuffle(augemented_train)
+        
+    def predict(self, X):
+        '''
+        Returns the predicted values.
+        '''
+        return self.model.predict(X)
+    
+    def get_model_name(self):
+        return self.model.__class__.__name__
+
+
+# In[274]:
+
+
+# Comparing Random Forest with Random Forest using pseudo labeling
+model_factory = [
+    RandomForestRegressor(),
+    
+    PseudoLabeler(
+        RandomForestRegressor(),
+        samples_encoding_test[col_filter],
+        features,
+        target='target',
+        sample_rate=0.3
+    ),
+]
+
+for model in model_factory:
+    model.seed = 42
+    num_folds = 8
+    
+    scores = cross_val_score(model, X_train_sub[col_filter], y_train_sub, cv=num_folds, scoring='r2')
+    score_description = "R2: %0.4f (+/- %0.4f)" % (scores.mean(), scores.std() * 2)
+
+    print('{model:25} CV-{num_folds} {score_cv}'.format(
+        model=model.__class__.__name__,
+        num_folds=num_folds,
+        score_cv=score_description
+    ))
+
+
+# In[276]:
+
+
+# Performance of pseudo-labeling depending on sampling rate
+sb.set(color_codes=True)
+sample_rates = np.linspace(0, 1, 10)
+
+def pseudo_label_wrapper(model):
+    return PseudoLabeler(model, samples_encoding_test[col_filter], features, target='target')
+
+# List of all models to test
+model_factory = [
+    RandomForestRegressor(n_jobs=1),
+    XGBRegressor(),
+    MLPRegressor(),
+    BayesianRidge(),
+    GradientBoostingRegressor()
+]
+
+# Apply the PseudoLabeler class to each model
+model_factory2 = list(map(pseudo_label_wrapper, model_factory))
+
+# Train each model with different sample rates
+results = {}
+num_folds = 5
+
+for model in model_factory2:
+    model_name = model.get_model_name()
+    results[model_name] = []
+    for sample_rate in sample_rates:
+        model.sample_rate = sample_rate
+        # Calculate the CV-3 R2 score and store it
+        scores = cross_val_score(model, X_train_sub[col_filter], y_train_sub, cv=num_folds, scoring='r2')
+        results[model_name].append(scores.mean())
+print(results)
+
+
+# In[277]:
+
+
+plt.figure(figsize=(16, 18))
+
+i = 1
+for model_name, performance in results.items():    
+    plt.subplot(3, 3, i)
+    i += 1
+    
+    plt.plot(sample_rates, performance)
+    plt.title(model_name)
+    plt.xlabel('sample_rate')
+    plt.ylabel('R2-score')
+
+plt.show()
+
+
+# In[278]:
+
+
+# Model Optimization
+# Random Forest with the sample rate with the best performace from the plot above
+model = PseudoLabeler(
+    RandomForestRegressor(),
+    samples_encoding_test[col_filter],
+    features,
+    target='target',
+    sample_rate = 0.5
+)
+
+model.fit(X_train_sub[col_filter], y_train_sub)
+m_pl_rf = model.predict(samples_encoding_test[col_filter])
+m_pl_rf_df = pd.DataFrame(m_pl_rf,columns=['prediction'])
+m_pl_rf_df['id'] = test_set_id
+m_pl_rf_df.T.head(20)
+
+
+# In[279]:
+
+
+# XGBoost with the sample rate with the best performace from the plot above
+model = PseudoLabeler(
+    XGBRegressor(nthread=1),
+    samples_encoding_test[col_filter],
+    features,
+    target='target',
+    sample_rate = 0.1
+)
+
+model.fit(X_train_sub[col_filter], y_train_sub)
+m_pl_xg = model.predict(samples_encoding_test[col_filter])
+m_pl_xg_df = pd.DataFrame(m_pl_xg,columns=['prediction'])
+m_pl_xg_df['id'] = test_set_id
+m_pl_xg_df.T.head(20)
+
+
+# In[280]:
+
+
+# Multiple layer Perception regression with the sample rate with the best performace from the plot above
+model = PseudoLabeler(
+    RandomForestRegressor(),
+    samples_encoding_test[col_filter],
+    features,
+    target='target',
+    sample_rate = 0.8
+)
+
+model.fit(X_train_sub[col_filter], y_train_sub)
+m_pl_nn = model.predict(samples_encoding_test[col_filter])
+m_pl_nn_df = pd.DataFrame(m_pl_nn,columns=['prediction'])
+m_pl_nn_df['id'] = test_set_id
+m_pl_nn_df.T.head(20)
+
+
+# In[281]:
+
+
+# Bayesian Ridge Regression with the sample rate with the best performace from the plot above
+model = PseudoLabeler(
+    RandomForestRegressor(),
+    samples_encoding_test[col_filter],
+    features,
+    target='target',
+    sample_rate = 0.2
+)
+
+model.fit(X_train_sub[col_filter], y_train_sub)
+m_pl_br = model.predict(samples_encoding_test[col_filter])
+m_pl_br_df = pd.DataFrame(m_pl_br,columns=['prediction'])
+m_pl_br_df['id'] = test_set_id
+m_pl_br_df.T.head(20)
+
+
+# In[282]:
+
+
+# Gradient Boosting with the sample rate with the best performace from the plot above
+model = PseudoLabeler(
+    RandomForestRegressor(),
+    samples_encoding_test[col_filter],
+    features,
+    target='target',
+    sample_rate = 0.1
+)
+
+model.fit(X_train_sub[col_filter], y_train_sub)
+m_pl_gb = model.predict(samples_encoding_test[col_filter])
+m_pl_gb_df = pd.DataFrame(m_pl_gb,columns=['prediction'])
+m_pl_gb_df['id'] = test_set_id
+m_pl_gb_df.T.head(20)
+
+
+# In[283]:
+
+
+m_pl_rf_df.to_csv('m_pl_rf_df.csv',index='False')
+m_pl_xg_df.to_csv('m_pl_xg_df.csv',index='False')
+m_pl_nn_df.to_csv('m_pl_rf_df.csv',index='False')
+m_pl_br_df.to_csv('m_pl_xg_df.csv',index='False')
+m_pl_gb_df.to_csv('m_pl_rf_df.csv',index='False')
+
